@@ -1,1 +1,25 @@
+Informe IVA Compras Ventas
+
+SELECCION
+
+Problema del estudio:
+* Solucionar de una forma simple y visual, cual es la posicion del IVA (saldo a favor/saldo a pagar), 
+en el transcurso de los periodos mensuales.
+
+Fuente de los datos: se van a utilizar dos archivos .xls generados por sistema de gestion con los siguientes formatos:
+
+* LibrodeIvaVentas_MMYYYY
+* LibrodeIvaCompras_MMYYYY
+
+Tipo de información: datos de las ventas, compras y gastos relacionados con la activdad del negocio.
+
+LIMPIEZA
+
+Ordenar datos LibrodeIvaVentas_MMYYYY:
+* Por columna D (Emisor) para identificar los puntos de ventas del cliente
+
+Ordenar datos LibrodeIvaCompras_MMYYYY:
+* Por columna H (Rubro) para separar mercaderias y varios.
+
+EXPLORACION
 
