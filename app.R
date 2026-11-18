@@ -49,6 +49,39 @@ fmt_pesos <- function(x) {
   )
 }
 
+# Detecta notas de crédito por el texto del tipo de comprobante
+es_nota_credito <- function(tipo) {
+  str_detect(tipo, regex("cr[eé]dito|^NC\\b|\\bNC\\b", ignore_case = TRUE))
+}
+
+# Excluye las NC y, por cada una, una factura del mismo cliente/proveedor
+# con el mismo monto (emparejamiento 1 a 1, se descarta la más antigua)
+excluir_nc_y_facturas <- function(df, col_id) {
+  if (nrow(df) == 0) return(df)
+  
+  df <- df %>%
+    mutate(
+      .es_nc = es_nota_credito(tipo) %in% TRUE,
+      .key = .data[[col_id]],
+      .monto_abs = round(abs(neto_gravado), 2)
+    )
+  
+  nc_por_grupo <- df %>%
+    filter(.es_nc) %>%
+    count(.key, .monto_abs, name = ".n_nc")
+  
+  df %>%
+    filter(!.es_nc) %>%
+    arrange(fecha) %>%
+    group_by(.key, .monto_abs) %>%
+    mutate(.orden = row_number()) %>%
+    ungroup() %>%
+    left_join(nc_por_grupo, by = c(".key", ".monto_abs")) %>%
+    mutate(.n_nc = replace_na(.n_nc, 0L)) %>%
+    filter(.orden > .n_nc) %>%
+    select(-starts_with("."))
+}
+
 # Rubros de compras que se consideran costo de mercadería vendida (CMV).
 # En los libros de compras el rubro viene sin tilde ("Mercaderias").
 # El rubro "Varios" no se suma como gasto: ya está cubierto por la planilla de gastos.
@@ -180,6 +213,12 @@ ventas_limpias <- map(archivos_ventas, procesar_archivo_ventas) %>% list_rbind()
 compras_limpias <- map(archivos_compras, procesar_archivo_compras) %>% list_rbind()
 gastos_limpios <- map(archivos_gastos, procesar_archivo_gastos) %>% list_rbind()
 
+# Versiones sin notas de crédito ni facturas asociadas (solo para estadísticas
+# descriptivas). Se calculan una sola vez sobre todo el período, porque la
+# factura y su NC pueden estar en meses distintos.
+ventas_sin_nc <- excluir_nc_y_facturas(ventas_limpias, "cuit")
+compras_sin_nc <- excluir_nc_y_facturas(compras_limpias, "proveedor")
+
 # 3. INTERFAZ DE USUARIO (UI) --------------------------------------------------
 ui <- page_sidebar(
   theme = mi_tema,
@@ -208,8 +247,8 @@ ui <- page_sidebar(
           theme = "secondary"
         ),
         value_box(
-          title = "Cantidad de Operaciones (Ventas)",
-          value = textOutput("txt_ops"),
+          title = "Gastos Operativos",
+          value = textOutput("txt_gastos"),
           theme = "info"
         )
       ),
@@ -231,7 +270,7 @@ ui <- page_sidebar(
     nav_panel(
       title = "Punto de Equilibrio",
       card(
-        card_header("Ventas Reales vs. Punto de Equilibrio por Unidad de Negocio"),
+        card_header("Ventas vs. Punto de Equilibrio por Unidad de Negocio"),
         plotOutput("grafico_equilibrio", height = "320px")
       ),
       card(
@@ -270,7 +309,8 @@ ui <- page_sidebar(
           tags$li("Omisión de encabezados institucionales superiores y filtrado de filas de totales y conceptos impositivos duplicados (IVA)."),
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
           tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldan."),
-          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad.")
+          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
+          tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo.")
         )
       )
     )
@@ -342,6 +382,46 @@ server <- function(input, output, session) {
     df
   })
   
+  gastos_filtrados <- reactive({
+    req(input$filtro_periodo, input$filtro_unidad)
+    df <- gastos_limpios
+    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
+    
+    if (input$filtro_periodo != "Todos los Meses") {
+      df <- df %>% filter(periodo == input$filtro_periodo)
+    }
+    if (input$filtro_unidad != "Todas las Unidades") {
+      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
+    }
+    df
+  })
+  
+  # Ventas y compras sin NC ni facturas asociadas (para estadísticas descriptivas)
+  ventas_desc <- reactive({
+    req(input$filtro_periodo, input$filtro_unidad)
+    df <- ventas_sin_nc
+    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
+    
+    if (input$filtro_periodo != "Todos los Meses") {
+      df <- df %>% filter(periodo == input$filtro_periodo)
+    }
+    if (input$filtro_unidad != "Todas las Unidades") {
+      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
+    }
+    df
+  })
+  
+  compras_desc <- reactive({
+    req(input$filtro_periodo)
+    df <- compras_sin_nc
+    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
+    
+    if (input$filtro_periodo != "Todos los Meses") {
+      df <- df %>% filter(periodo == input$filtro_periodo)
+    }
+    df
+  })
+  
   output$txt_ventas <- renderText({
     if (nrow(ventas_filtradas()) == 0) return("$0,00")
     dollar(sum(ventas_filtradas()$neto_gravado, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
@@ -352,8 +432,9 @@ server <- function(input, output, session) {
     dollar(sum(compras_filtradas()$neto_gravado, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
   })
   
-  output$txt_ops <- renderText({
-    format(nrow(ventas_filtradas()), big.mark = ".", decimal.mark = ",")
+  output$txt_gastos <- renderText({
+    if (nrow(gastos_filtrados()) == 0) return("$0,00")
+    dollar(sum(gastos_filtrados()$monto, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
   })
   
   output$grafico_lineas <- renderPlot({
@@ -472,24 +553,24 @@ server <- function(input, output, session) {
         }
       )
     
-    # El total solo tiene sentido si hay más de una unidad en la tabla
+    # El total tiene sentido porque hay más de una unidad en la tabla
     tabla_base <- if (nrow(datos) > 1) bind_rows(datos, fila_total) else datos
     
     tabla_base %>%
       transmute(
         "Unidad de Negocio" = unidad_negocio,
-        "Ventas Netas" = fmt_pesos(ventas_reales),
-        "(-) CMV" = fmt_pesos(cmv_asignado),
+        "Ventas" = fmt_pesos(ventas_reales),
+        "(-) Costo Mercad. Vendidas" = fmt_pesos(cmv_asignado),
         "(=) Margen de Contribución" = fmt_pesos(margen_contribucion),
-        "(-) Gastos Fijos (planilla)" = fmt_pesos(gastos_fijos),
+        "(-) Gastos Fijos" = fmt_pesos(gastos_fijos),
         "(=) Resultado Neto" = fmt_pesos(resultado_neto),
         "Punto de Equilibrio ($)" = fmt_pesos(punto_equilibrio)
       )
   })
   
   output$tabla_desc_ventas <- renderTable({
-    req(nrow(ventas_filtradas()) > 0)
-    ventas_filtradas() %>%
+    req(nrow(ventas_desc()) > 0)
+    ventas_desc() %>%
       group_by(unidad_negocio) %>%
       summarise(
         Operaciones = n(),
@@ -508,7 +589,7 @@ server <- function(input, output, session) {
   })
   
   output$grafico_boxplot <- renderPlot({
-    datos <- ventas_filtradas() %>% filter(neto_gravado > 0)
+    datos <- ventas_desc() %>% filter(neto_gravado > 0)
     req(nrow(datos) > 0)
     # Escala logarítmica porque los montos por operación suelen ser muy asimétricos
     ggplot(datos, aes(x = unidad_negocio, y = neto_gravado, fill = unidad_negocio)) +
@@ -519,8 +600,8 @@ server <- function(input, output, session) {
   })
   
   output$tabla_desc_compras <- renderTable({
-    req(nrow(compras_filtradas()) > 0)
-    compras_filtradas() %>%
+    req(nrow(compras_desc()) > 0)
+    compras_desc() %>%
       group_by(rubro) %>%
       summarise(
         Operaciones = n(),
@@ -540,11 +621,11 @@ server <- function(input, output, session) {
   output$grafico_equilibrio <- renderPlot({
     req(nrow(datos_equilibrio()) > 0)
     datos_equilibrio() %>%
-      select(unidad_negocio, "Ventas Reales" = ventas_reales, "Punto de Equilibrio" = punto_equilibrio) %>%
+      select(unidad_negocio, "Ventas" = ventas_reales, "Punto de Equilibrio" = punto_equilibrio) %>%
       pivot_longer(-unidad_negocio, names_to = "concepto", values_to = "monto") %>%
       ggplot(aes(x = unidad_negocio, y = monto, fill = concepto)) +
       geom_col(position = "dodge") + theme_minimal() +
-      scale_fill_manual(values = c("Ventas Reales" = "#18bc9c", "Punto de Equilibrio" = "#2c3e50")) +
+      scale_fill_manual(values = c("Ventas" = "#18bc9c", "Punto de Equilibrio" = "#2c3e50")) +
       labs(x = NULL, y = "Monto Neto ($)", fill = NULL) +
       scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
   })
@@ -553,4 +634,3 @@ server <- function(input, output, session) {
 
 # 5. LANZAMIENTO DE LA APLICACIÓN ----------------------------------------------
 shinyApp(ui = ui, server = server)
-
