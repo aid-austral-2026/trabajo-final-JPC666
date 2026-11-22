@@ -19,6 +19,14 @@ mi_tema <- bs_theme(
   secondary = "#18bc9c"
 )
 
+# Un color fijo por unidad de negocio (se mantiene al filtrar)
+colores_unidad <- c(
+  "Rosario" = "#619CFF",
+  "Funes"   = "#F8766D",
+  "Roldan"  = "#00BA38",
+  "Otros"   = "#95a5a6"
+)
+
 # 2. ETAPA: SELECCIÓN Y LIMPIEZA (PROCESAMIENTO EN LOTE) ------------------------
 
 # Función auxiliar segura para convertir fechas mixtas de Excel
@@ -209,15 +217,136 @@ archivos_ventas <- list.files(path = "datos/ventas", pattern = "^[^~].*\\.xlsx?$
 archivos_compras <- list.files(path = "datos/compras", pattern = "^[^~].*\\.xlsx?$", full.names = TRUE, ignore.case = TRUE)
 archivos_gastos <- list.files(path = "datos/gastos", pattern = "^[^~].*\\.xlsx?$", full.names = TRUE, ignore.case = TRUE)
 
-ventas_limpias <- map(archivos_ventas, procesar_archivo_ventas) %>% list_rbind()
-compras_limpias <- map(archivos_compras, procesar_archivo_compras) %>% list_rbind()
-gastos_limpios <- map(archivos_gastos, procesar_archivo_gastos) %>% list_rbind()
+ventas_todas <- map(archivos_ventas, procesar_archivo_ventas) %>% list_rbind()
+compras_todas <- map(archivos_compras, procesar_archivo_compras) %>% list_rbind()
+gastos_todos <- map(archivos_gastos, procesar_archivo_gastos) %>% list_rbind()
+
+# Años de la comparación interanual:
+# anio_base se ajusta por IPC; anio_actual se muestra a valores históricos
+anio_base <- 2025
+anio_actual <- 2026
+
+solo_anio <- function(df, anio) {
+  if (nrow(df) == 0) return(df)
+  df %>% filter(substr(periodo, 1, 4) == as.character(anio))
+}
+
+# El tablero, el punto de equilibrio y las estadísticas descriptivas
+# trabajan solo con el año actual; los archivos de 2025 van a la comparación
+ventas_limpias <- solo_anio(ventas_todas, anio_actual)
+compras_limpias <- solo_anio(compras_todas, anio_actual)
+gastos_limpios <- solo_anio(gastos_todos, anio_actual)
 
 # Versiones sin notas de crédito ni facturas asociadas (solo para estadísticas
 # descriptivas). Se calculan una sola vez sobre todo el período, porque la
 # factura y su NC pueden estar en meses distintos.
 ventas_sin_nc <- excluir_nc_y_facturas(ventas_limpias, "cuit")
 compras_sin_nc <- excluir_nc_y_facturas(compras_limpias, "proveedor")
+
+# --- Comparación interanual ajustada por IPC -----------------------------------
+# IPC nivel general nacional (INDEC, base dic-2016 = 100).
+# Archivo: datos/ipc/ipc_2016-2026.xlsx (hoja con las fechas en la fila 1, desde la
+# columna B, y la fila "Nivel general" con los índices). Se usa el primer .xlsx de datos/ipc.
+leer_ipc <- function(ruta) {
+  tryCatch({
+    crudo <- read_excel(ruta, col_names = FALSE, col_types = "text", .name_repair = "unique_quiet")
+    fila_nivel <- which(str_to_lower(trimws(crudo[[1]])) == "nivel general")[1]
+    
+    tibble(
+      fecha = parsear_fecha_excel(unlist(crudo[1, -1], use.names = FALSE)),
+      indice = suppressWarnings(as.numeric(unlist(crudo[fila_nivel, -1], use.names = FALSE)))
+    ) %>%
+      filter(!is.na(fecha), !is.na(indice)) %>%
+      transmute(periodo = format(fecha, "%Y-%m"), indice) %>%
+      distinct(periodo, .keep_all = TRUE)
+  }, error = function(e) {
+    message(paste("ERROR EN IPC ->", ruta, ":", conditionMessage(e)))
+    tibble(periodo = character(), indice = numeric())
+  })
+}
+
+archivo_ipc <- list.files(path = "datos/ipc", pattern = "^[^~].*\\.xlsx?$", full.names = TRUE, ignore.case = TRUE)[1]
+ipc_tabla <- if (is.na(archivo_ipc)) {
+  tibble(periodo = character(), indice = numeric())
+} else {
+  leer_ipc(archivo_ipc)
+}
+
+# Coeficiente por mes = IPC del mes en el año actual / IPC del mismo mes en el año base
+coef_ipc <- tibble(mes = sprintf("%02d", 1:12)) %>%
+  mutate(
+    indice_base = ipc_tabla$indice[match(paste0(anio_base, "-", mes), ipc_tabla$periodo)],
+    indice_actual = ipc_tabla$indice[match(paste0(anio_actual, "-", mes), ipc_tabla$periodo)],
+    coef = indice_actual / indice_base
+  )
+
+sumar_mensual <- function(df, columna, por_unidad = TRUE) {
+  if (nrow(df) == 0) {
+    return(tibble(periodo = character(), unidad_negocio = character(), monto = numeric()))
+  }
+  if (por_unidad) {
+    df %>%
+      group_by(periodo, unidad_negocio) %>%
+      summarise(monto = sum(.data[[columna]], na.rm = TRUE), .groups = "drop")
+  } else {
+    # Las compras no se registran por unidad de negocio
+    df %>%
+      group_by(periodo) %>%
+      summarise(monto = sum(.data[[columna]], na.rm = TRUE), .groups = "drop") %>%
+      mutate(unidad_negocio = NA_character_)
+  }
+}
+
+# Compras de mercadería por unidad: el libro de IVA Compras no trae la unidad de negocio,
+# así que cada mes se reparte según la participación de cada unidad en las ventas de ese
+# mes (mismo criterio que el CMV del Punto de Equilibrio). Es una estimación.
+# Solo se consideran las compras del rubro mercadería (rubros_mercaderia).
+compras_por_unidad <- inner_join(
+  sumar_mensual(
+    compras_todas %>% filter(rubro %in% rubros_mercaderia),
+    "neto_gravado",
+    por_unidad = FALSE
+  ) %>%
+    select(periodo, monto_compras = monto),
+  sumar_mensual(ventas_todas, "neto_gravado") %>%
+    group_by(periodo) %>%
+    mutate(participacion = if (sum(monto) > 0) monto / sum(monto) else NA_real_) %>%
+    ungroup() %>%
+    select(periodo, unidad_negocio, participacion),
+  by = "periodo"
+) %>%
+  transmute(periodo, unidad_negocio, monto = monto_compras * participacion)
+
+# Totales mensuales de todos los años cargados (mismos criterios que los KPI del tablero)
+resumen_mensual <- bind_rows(
+  sumar_mensual(ventas_todas, "neto_gravado") %>% mutate(concepto = "Ventas"),
+  compras_por_unidad %>% mutate(concepto = "Compras"),
+  sumar_mensual(gastos_todos, "monto") %>% mutate(concepto = "Gastos")
+) %>%
+  mutate(anio = substr(periodo, 1, 4), mes = substr(periodo, 6, 7))
+
+etiqueta_base <- paste0(anio_base, " (ajustado por IPC)")
+etiqueta_actual <- paste0(anio_actual, " (histórico)")
+meses_es <- c("Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic")
+
+# Solo se comparan meses que tienen datos en ambos años
+armar_comparacion <- function(resumen) {
+  resumen <- resumen %>%
+    group_by(anio, mes, concepto) %>%
+    summarise(monto = sum(monto, na.rm = TRUE), .groups = "drop")
+  
+  inner_join(
+    resumen %>% filter(anio == as.character(anio_base)) %>% select(mes, concepto, monto_base = monto),
+    resumen %>% filter(anio == as.character(anio_actual)) %>% select(mes, concepto, monto_actual = monto),
+    by = c("mes", "concepto")
+  ) %>%
+    left_join(coef_ipc %>% select(mes, coef), by = "mes") %>%
+    mutate(
+      monto_base_aj = monto_base * coef,
+      var_real = if_else(monto_base_aj > 0, monto_actual / monto_base_aj - 1, NA_real_),
+      concepto = factor(concepto, levels = c("Ventas", "Compras", "Gastos"))
+    )
+}
 
 # 3. INTERFAZ DE USUARIO (UI) --------------------------------------------------
 ui <- page_sidebar(
@@ -242,7 +371,7 @@ ui <- page_sidebar(
           theme = "primary"
         ),
         value_box(
-          title = "Compras Netas Gravadas",
+          title = "Compras de Mercadería (Netas Gravadas)",
           value = textOutput("txt_compras_netas"),
           theme = "secondary"
         ),
@@ -253,7 +382,7 @@ ui <- page_sidebar(
         )
       ),
       card(
-        card_header("Evolución Diaria de Ventas por Unidad de Negocio"),
+        card_header("Evolución Mensual de Rentabilidad por Unidad de Negocio (Ventas − Compras − Gastos)"),
         plotOutput("grafico_lineas", height = "300px")
       ),
       layout_columns(
@@ -262,7 +391,7 @@ ui <- page_sidebar(
           plotOutput("grafico_barras", height = "280px")
         ),
         card(
-          card_header("Top 5 Proveedores por Compras Netas"),
+          card_header("Top 5 Proveedores de Mercadería (Compras Netas)"),
           plotOutput("grafico_proveedores", height = "280px")
         )
       )
@@ -276,6 +405,28 @@ ui <- page_sidebar(
       card(
         card_header("Márgenes de Contribución y Punto de Equilibrio"),
         tableOutput("tabla_equilibrio_ui")
+      )
+    ),
+    nav_panel(
+      title = "Comparación Interanual (IPC)",
+      uiOutput("alerta_comparacion"),
+      card(
+        min_height = 480,
+        card_header(paste0("Ventas, compras y gastos: ", anio_base, " ajustado por IPC vs. ", anio_actual, " histórico")),
+        plotOutput("grafico_comparacion", height = "400px")
+      ),
+      card(
+        min_height = 420,
+        card_header("Detalle mensual y variación real"),
+        tableOutput("tabla_comparacion"),
+        p(
+          class = "text-muted",
+          paste0(
+            "Coeficiente = IPC del mes en ", anio_actual, " / IPC del mismo mes en ", anio_base,
+            ". Variación real = ", anio_actual, " histórico / ", anio_base,
+            " ajustado - 1. Responde a los filtros del panel lateral (el período elige el mismo mes en ambos años). Las compras por unidad son una estimación: cada mes se reparte según la participación de la unidad en las ventas."
+          )
+        )
       )
     ),
     nav_panel(
@@ -310,7 +461,9 @@ ui <- page_sidebar(
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
           tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldan."),
           tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
-          tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo.")
+          tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
+          tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
+          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se resta porque ya está cubierto por la planilla de gastos.")
         )
       )
     )
@@ -427,9 +580,29 @@ server <- function(input, output, session) {
     dollar(sum(ventas_filtradas()$neto_gravado, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
   })
   
+  # Compras de mercadería. Con una unidad seleccionada se usa la estimación por
+  # participación en las ventas del mes (las compras no traen unidad de negocio).
   output$txt_compras_netas <- renderText({
-    if (nrow(compras_filtradas()) == 0) return("$0,00")
-    dollar(sum(compras_filtradas()$neto_gravado, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
+    req(input$filtro_periodo, input$filtro_unidad)
+    
+    total <- if (input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+      compras_filtradas() %>%
+        filter(rubro %in% rubros_mercaderia) %>%
+        pull(neto_gravado) %>%
+        sum(na.rm = TRUE)
+    } else {
+      df <- compras_por_unidad %>%
+        filter(
+          substr(periodo, 1, 4) == as.character(anio_actual),
+          unidad_negocio == input$filtro_unidad
+        )
+      if (input$filtro_periodo != "Todos los Meses") {
+        df <- df %>% filter(periodo == input$filtro_periodo)
+      }
+      sum(df$monto, na.rm = TRUE)
+    }
+    
+    dollar(total, prefix = "$", big.mark = ".", decimal.mark = ",")
   })
   
   output$txt_gastos <- renderText({
@@ -437,18 +610,49 @@ server <- function(input, output, session) {
     dollar(sum(gastos_filtrados()$monto, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
   })
   
+  # Evolución mensual de rentabilidad = ventas - compras de mercadería (estimadas
+  # por unidad) - gastos operativos
   output$grafico_lineas <- renderPlot({
-    req(nrow(ventas_filtradas()) > 0)
-    ventas_filtradas() %>%
-      filter(!is.na(fecha)) %>%
-      group_by(fecha, unidad_negocio) %>%
-      summarise(v_diaria = sum(neto_gravado, na.rm = TRUE), .groups = "drop") %>%
-      ggplot(aes(x = fecha, y = v_diaria, color = unidad_negocio, group = unidad_negocio)) +
+    req(input$filtro_periodo, input$filtro_unidad)
+    
+    datos <- resumen_mensual %>%
+      filter(anio == as.character(anio_actual), !is.na(unidad_negocio)) %>%
+      pivot_wider(
+        id_cols = c(periodo, unidad_negocio),
+        names_from = concepto,
+        values_from = monto,
+        values_fill = 0
+      ) %>%
+      mutate(
+        Ventas = coalesce(Ventas, 0),
+        Compras = coalesce(Compras, 0),
+        Gastos = coalesce(Gastos, 0),
+        rentabilidad = Ventas - Compras - Gastos
+      )
+    
+    if (input$filtro_unidad != "Todas las Unidades") {
+      datos <- datos %>% filter(unidad_negocio == input$filtro_unidad)
+    }
+    if (!input$filtro_periodo %in% c("Todos los Meses", "Sin Datos")) {
+      datos <- datos %>% filter(periodo == input$filtro_periodo)
+    }
+    req(nrow(datos) > 0)
+    
+    datos <- datos %>%
+      mutate(mes = factor(
+        as.integer(substr(periodo, 6, 7)),
+        levels = 1:12, labels = meses_es
+      ))
+    
+    ggplot(datos, aes(x = mes, y = rentabilidad, color = unidad_negocio, group = unidad_negocio)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
       geom_line(linewidth = 1.1) +
-      geom_point(size = 2) +
+      geom_point(size = 2.5) +
+      scale_color_manual(values = colores_unidad) +
+      scale_x_discrete(drop = TRUE) +
+      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ",")) +
       theme_minimal() +
-      labs(x = "Fecha", y = "Monto Neto ($)", color = "Unidad de Negocio") +
-      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
+      labs(x = NULL, y = "Rentabilidad ($)", color = "Unidad de Negocio")
   })
   
   output$grafico_barras <- renderPlot({
@@ -459,14 +663,18 @@ server <- function(input, output, session) {
       ggplot(aes(x = reorder(unidad_negocio, total_neto), y = total_neto, fill = unidad_negocio)) +
       geom_col(show.legend = FALSE) +
       coord_flip() +
+      scale_fill_manual(values = colores_unidad) +
       theme_minimal() +
       labs(x = NULL, y = "Ventas Netas ($)") +
       scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
   })
   
   output$grafico_proveedores <- renderPlot({
-    req(nrow(compras_filtradas()) > 0)
-    compras_filtradas() %>%
+    datos <- compras_filtradas() %>%
+      filter(rubro %in% rubros_mercaderia)
+    req(nrow(datos) > 0)
+    
+    datos %>%
       group_by(proveedor) %>%
       summarise(gasto = sum(neto_gravado, na.rm = TRUE), .groups = "drop") %>%
       slice_max(gasto, n = 5, with_ties = FALSE) %>%
@@ -594,6 +802,7 @@ server <- function(input, output, session) {
     # Escala logarítmica porque los montos por operación suelen ser muy asimétricos
     ggplot(datos, aes(x = unidad_negocio, y = neto_gravado, fill = unidad_negocio)) +
       geom_boxplot(show.legend = FALSE) +
+      scale_fill_manual(values = colores_unidad) +
       scale_y_log10(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ",")) +
       theme_minimal() +
       labs(x = NULL, y = "Monto neto por operación ($, escala log)")
@@ -628,6 +837,100 @@ server <- function(input, output, session) {
       scale_fill_manual(values = c("Ventas" = "#18bc9c", "Punto de Equilibrio" = "#2c3e50")) +
       labs(x = NULL, y = "Monto Neto ($)", fill = NULL) +
       scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
+  })
+  
+  # --- Comparación interanual ---
+  comparacion_filtrada <- reactive({
+    req(input$filtro_periodo, input$filtro_unidad)
+    df <- resumen_mensual
+    if (input$filtro_unidad != "Todas las Unidades") {
+      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
+    }
+    if (!input$filtro_periodo %in% c("Todos los Meses", "Sin Datos")) {
+      df <- df %>% filter(mes == substr(input$filtro_periodo, 6, 7))
+    }
+    armar_comparacion(df)
+  })
+  
+  output$alerta_comparacion <- renderUI({
+    if (nrow(ipc_tabla) == 0 || all(is.na(coef_ipc$coef))) {
+      div(
+        class = "alert alert-warning",
+        "⚠️ Faltan los índices IPC (datos/ipc/ipc_2016-2026.xlsx) de ambos años: sin ellos no se puede calcular el ajuste."
+      )
+    } else if (nrow(comparacion_filtrada()) == 0) {
+      div(
+        class = "alert alert-warning",
+        paste0("⚠️ No hay meses con datos cargados en ambos años (", anio_base, " y ", anio_actual, ").")
+      )
+    } else if (!is.null(input$filtro_unidad) && !input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+      div(
+        class = "alert alert-info",
+        "Las compras no se registran por unidad: con una unidad seleccionada se estiman repartiendo las compras de cada mes según la participación de esa unidad en las ventas del mes."
+      )
+    } else {
+      NULL
+    }
+  })
+  
+  output$grafico_comparacion <- renderPlot({
+    datos <- comparacion_filtrada() %>% filter(!is.na(coef))
+    req(nrow(datos) > 0)
+    
+    # Montos en millones para que los ejes y las etiquetas sean legibles
+    etiqueta_m <- label_number(
+      scale = 1e-6, prefix = "$", suffix = " M",
+      accuracy = 0.1, big.mark = ".", decimal.mark = ","
+    )
+    
+    datos_graf <- datos %>%
+      select(mes, concepto, monto_base_aj, monto_actual) %>%
+      pivot_longer(c(monto_base_aj, monto_actual), names_to = "serie", values_to = "monto") %>%
+      mutate(
+        serie = if_else(serie == "monto_base_aj", etiqueta_base, etiqueta_actual),
+        serie = factor(serie, levels = c(etiqueta_base, etiqueta_actual)),
+        mes = factor(mes, levels = sprintf("%02d", 1:12), labels = meses_es)
+      )
+    
+    # Etiquetas de valor solo cuando hay pocos meses (si no, se superponen)
+    capa_etiquetas <- if (n_distinct(datos_graf$mes) <= 4) {
+      geom_text(
+        aes(label = etiqueta_m(monto)),
+        position = position_dodge(width = 0.8), vjust = -0.5, size = 3.6
+      )
+    } else {
+      NULL
+    }
+    
+    ggplot(datos_graf, aes(x = mes, y = monto, fill = serie)) +
+      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+      capa_etiquetas +
+      facet_wrap(~ concepto, nrow = 1, scales = "free_y") +
+      scale_fill_manual(values = setNames(c("#95a5a6", "#18bc9c"), c(etiqueta_base, etiqueta_actual))) +
+      scale_y_continuous(labels = etiqueta_m, expand = expansion(mult = c(0, 0.15))) +
+      theme_minimal(base_size = 13) +
+      theme(
+        legend.position = "top",
+        strip.text = element_text(face = "bold", size = 13),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank()
+      ) +
+      labs(x = NULL, y = "Monto neto (millones de $)", fill = NULL)
+  })
+  
+  output$tabla_comparacion <- renderTable({
+    req(nrow(comparacion_filtrada()) > 0)
+    comparacion_filtrada() %>%
+      arrange(mes, concepto) %>%
+      transmute(
+        "Mes" = meses_es[as.integer(mes)],
+        "Concepto" = as.character(concepto),
+        !!paste0(anio_base, " histórico") := fmt_pesos(monto_base),
+        "Coef. IPC" = if_else(is.na(coef), "Sin IPC", number(coef, accuracy = 0.0001, decimal.mark = ",")),
+        !!paste0(anio_base, " ajustado") := fmt_pesos(monto_base_aj),
+        !!paste0(anio_actual, " histórico") := fmt_pesos(monto_actual),
+        "Variación real" = if_else(is.na(var_real), "No calculable", percent(var_real, accuracy = 0.1, decimal.mark = ",", big.mark = "."))
+      )
   })
   
 }  # fin de server
