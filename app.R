@@ -9,6 +9,7 @@
 library(shiny)
 library(bslib)
 library(tidyverse)
+library(lubridate)
 library(scales)
 library(readxl)
 
@@ -23,7 +24,7 @@ mi_tema <- bs_theme(
 colores_unidad <- c(
   "Rosario" = "#619CFF",
   "Funes"   = "#F8766D",
-  "Roldan"  = "#00BA38",
+  "Roldán"  = "#00BA38",
   "Otros"   = "#95a5a6"
 )
 
@@ -116,7 +117,7 @@ procesar_archivo_ventas <- function(ruta_archivo) {
         unidad_negocio = case_when(
           punto_venta %in% c(3, 6) ~ "Rosario",
           punto_venta %in% c(5, 7) ~ "Funes",
-          punto_venta == 8 ~ "Roldan",
+          punto_venta == 8 ~ "Roldán",
           TRUE ~ "Otros"
         )
       ) %>%
@@ -195,7 +196,7 @@ procesar_archivo_gastos <- function(ruta_archivo) {
         unidad_negocio = case_when(
           punto_venta %in% c(3, 6) ~ "Rosario",
           punto_venta %in% c(5, 7) ~ "Funes",
-          punto_venta == 8 ~ "Roldan",
+          punto_venta == 8 ~ "Roldán",
           TRUE ~ "Otros"
         )
       ) %>%
@@ -371,7 +372,7 @@ ui <- page_sidebar(
           theme = "primary"
         ),
         value_box(
-          title = "Compras de Mercadería (Netas Gravadas)",
+          title = "Compras de Mercadería",
           value = textOutput("txt_compras_netas"),
           theme = "secondary"
         ),
@@ -383,7 +384,7 @@ ui <- page_sidebar(
       ),
       card(
         card_header("Evolución Mensual de Rentabilidad por Unidad de Negocio (Ventas − Compras − Gastos)"),
-        plotOutput("grafico_lineas", height = "300px")
+        plotOutput("grafico_rentabilidad", height = "300px")
       ),
       layout_columns(
         card(
@@ -437,12 +438,12 @@ ui <- page_sidebar(
       ),
       layout_columns(
         card(
-          card_header("Distribución Ventas (monto neto por operación en escala logarítmica)"),
-          plotOutput("grafico_boxplot", height = "300px")
+          card_header("Resumen de compras por rubro (solo mercaderías)"),
+          tableOutput("tabla_desc_compras")
         ),
         card(
-          card_header("Resumen de compras por rubro"),
-          tableOutput("tabla_desc_compras")
+          card_header("Resumen de gastos por rubro"),
+          tableOutput("tabla_desc_gastos")
         )
       )
     ),
@@ -451,7 +452,8 @@ ui <- page_sidebar(
       card(
         card_header("a. Selección de Datos y Problema en Estudio"),
         p("El objetivo de esta aplicación es evaluar la rentabilidad comercial, la estructura de costos y el punto de equilibrio multi-período por unidad de negocio."),
-        p("Fuentes de datos: Libros contables mensuales de IVA Ventas e IVA Compras (AFIP) y planillas mensuales de gastos operativos directos asignados por unidad de negocio (datos/ventas, datos/compras y datos/gastos).")
+        p("Fuentes de datos: Libros contables mensuales de IVA Ventas e IVA Compras (AFIP) y planillas mensuales de gastos operativos directos asignados por unidad de negocio (datos/ventas, datos/compras y datos/gastos)."),
+        p("Para la comparación interanual se usa además el índice de precios al consumidor (IPC), nivel general nacional, publicado por el INDEC (datos/ipc). Se cargan los períodos de 2025 y 2026: los de 2026 alimentan el tablero, el punto de equilibrio y las estadísticas descriptivas, y los de 2025 se usan solo en la comparación interanual.")
       ),
       card(
         card_header("b. Limpieza y Transformación de Datos"),
@@ -459,11 +461,12 @@ ui <- page_sidebar(
           tags$li("Ingesta automatizada en lote desde rutas relativas (datos/ventas, datos/compras y datos/gastos), ignorando archivos temporales."),
           tags$li("Omisión de encabezados institucionales superiores y filtrado de filas de totales y conceptos impositivos duplicados (IVA)."),
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
-          tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldan."),
+          tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldán."),
           tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
           tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
           tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
-          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se resta porque ya está cubierto por la planilla de gastos.")
+          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se resta porque ya está cubierto por la planilla de gastos."),
+          tags$li("En las estadísticas descriptivas, los conceptos de la planilla de gastos se agrupan en tres rubros: Servicios (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), Contribuciones patronales (F931, AEC, FAECYS y Estrella) e Impuestos (DREI, IIBB, Impuesto al Valor Agregado, IIGG y autónomos). Los conceptos que no pertenecen a ningún grupo, como los sueldos, se muestran con su nombre original.")
         )
       )
     )
@@ -612,7 +615,7 @@ server <- function(input, output, session) {
   
   # Evolución mensual de rentabilidad = ventas - compras de mercadería (estimadas
   # por unidad) - gastos operativos
-  output$grafico_lineas <- renderPlot({
+  output$grafico_rentabilidad <- renderPlot({
     req(input$filtro_periodo, input$filtro_unidad)
     
     datos <- resumen_mensual %>%
@@ -644,15 +647,15 @@ server <- function(input, output, session) {
         levels = 1:12, labels = meses_es
       ))
     
-    ggplot(datos, aes(x = mes, y = rentabilidad, color = unidad_negocio, group = unidad_negocio)) +
-      geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
-      geom_line(linewidth = 1.1) +
-      geom_point(size = 2.5) +
-      scale_color_manual(values = colores_unidad) +
+    ggplot(datos, aes(x = mes, y = rentabilidad, fill = unidad_negocio)) +
+      geom_hline(yintercept = 0, color = "grey40") +
+      geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+      scale_fill_manual(values = colores_unidad) +
       scale_x_discrete(drop = TRUE) +
       scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ",")) +
       theme_minimal() +
-      labs(x = NULL, y = "Rentabilidad ($)", color = "Unidad de Negocio")
+      theme(panel.grid.major.x = element_blank()) +
+      labs(x = NULL, y = "Rentabilidad ($)", fill = "Unidad de Negocio")
   })
   
   output$grafico_barras <- renderPlot({
@@ -796,21 +799,10 @@ server <- function(input, output, session) {
       rename(`Unidad de Negocio` = unidad_negocio)
   })
   
-  output$grafico_boxplot <- renderPlot({
-    datos <- ventas_desc() %>% filter(neto_gravado > 0)
-    req(nrow(datos) > 0)
-    # Escala logarítmica porque los montos por operación suelen ser muy asimétricos
-    ggplot(datos, aes(x = unidad_negocio, y = neto_gravado, fill = unidad_negocio)) +
-      geom_boxplot(show.legend = FALSE) +
-      scale_fill_manual(values = colores_unidad) +
-      scale_y_log10(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ",")) +
-      theme_minimal() +
-      labs(x = NULL, y = "Monto neto por operación ($, escala log)")
-  })
-  
   output$tabla_desc_compras <- renderTable({
-    req(nrow(compras_desc()) > 0)
+    req(nrow(compras_desc() %>% filter(rubro %in% rubros_mercaderia)) > 0)
     compras_desc() %>%
+      filter(rubro %in% rubros_mercaderia) %>%
       group_by(rubro) %>%
       summarise(
         Operaciones = n(),
@@ -825,6 +817,40 @@ server <- function(input, output, session) {
         across(c(Total, Mediana), fmt_pesos)
       ) %>%
       rename(Rubro = rubro)
+  })
+  
+  # Resumen de gastos agrupado en SERVICIOS, CONTRIBUCIONES PATRONALES e IMPUESTOS.
+  # Los conceptos que no entran en ningún grupo (por ejemplo SUELDOS) conservan su nombre.
+  # Responde a los filtros de período y unidad de negocio.
+  output$tabla_desc_gastos <- renderTable({
+    req(nrow(gastos_filtrados()) > 0)
+    
+    gastos_filtrados() %>%
+      mutate(
+        rubro_gasto = case_when(
+          str_detect(
+            concepto,
+            regex("\\bEPE\\b|telef|internet|alarma|limpie|sinergia|refriger|\\bVARIOS\\b", ignore_case = TRUE)
+          ) ~ "SERVICIOS",
+          str_detect(
+            concepto,
+            regex("F\\.?\\s?931|\\bAEC\\b|FAECYS|ESTRELLA", ignore_case = TRUE)
+          ) ~ "CONTRIBUCIONES PATRONALES",
+          str_detect(
+            concepto,
+            regex("\\bDREI\\b|\\bIIBB\\b|impuesto\\s*valor\\s*agregado|\\bIVA\\b|\\bIIGG\\b|aut[oó]nomo", ignore_case = TRUE)
+          ) ~ "IMPUESTOS",
+          TRUE ~ concepto
+        )
+      ) %>%
+      group_by(rubro_gasto) %>%
+      summarise(Total = sum(monto, na.rm = TRUE), .groups = "drop") %>%
+      arrange(desc(Total)) %>%
+      mutate(
+        `% del total` = percent(Total / sum(Total), accuracy = 0.1, decimal.mark = ",", big.mark = "."),
+        Total = fmt_pesos(Total)
+      ) %>%
+      rename(Rubro = rubro_gasto)
   })
   
   output$grafico_equilibrio <- renderPlot({
