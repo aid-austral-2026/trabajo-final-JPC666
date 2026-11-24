@@ -58,6 +58,12 @@ fmt_pesos <- function(x) {
   )
 }
 
+# Etiquetas de ejes en miles de pesos (por ejemplo, $12.500 equivale a $12.500.000)
+etiqueta_miles <- label_number(
+  scale = 1e-3, prefix = "$",
+  accuracy = 1, big.mark = ".", decimal.mark = ","
+)
+
 # Detecta notas de crédito por el texto del tipo de comprobante
 es_nota_credito <- function(tipo) {
   str_detect(tipo, regex("cr[eé]dito|^NC\\b|\\bNC\\b", ignore_case = TRUE))
@@ -367,12 +373,12 @@ ui <- page_sidebar(
       title = "Tablero de Rentabilidad",
       layout_columns(
         value_box(
-          title = "Ventas Netas Gravadas",
+          title = "Ventas",
           value = textOutput("txt_ventas"),
           theme = "primary"
         ),
         value_box(
-          title = "Compras de Mercadería",
+          title = "Compras (Mercadería)",
           value = textOutput("txt_compras_netas"),
           theme = "secondary"
         ),
@@ -383,16 +389,16 @@ ui <- page_sidebar(
         )
       ),
       card(
-        card_header("Evolución Mensual de Rentabilidad por Unidad de Negocio (Ventas − Compras − Gastos)"),
+        card_header("Evolución Mensual de Rentabilidad por Unidad de Negocio (Ventas (−) Compras (−) Gastos)"),
         plotOutput("grafico_rentabilidad", height = "300px")
       ),
       layout_columns(
         card(
-          card_header("Ventas Netas por Unidad de Negocio"),
+          card_header("Ventas por Unidad de Negocio"),
           plotOutput("grafico_barras", height = "280px")
         ),
         card(
-          card_header("Top 5 Proveedores de Mercadería (Compras Netas)"),
+          card_header("Top 5 Proveedores de Compras (Mercaderías)"),
           plotOutput("grafico_proveedores", height = "280px")
         )
       )
@@ -413,7 +419,7 @@ ui <- page_sidebar(
       uiOutput("alerta_comparacion"),
       card(
         min_height = 480,
-        card_header(paste0("Ventas, compras y gastos: ", anio_base, " ajustado por IPC vs. ", anio_actual, " histórico")),
+        card_header(paste0("Ventas, compras y gastos: ", anio_base, " (ajustado por IPC) vs. ", anio_actual, " (histórico)")),
         plotOutput("grafico_comparacion", height = "400px")
       ),
       card(
@@ -424,8 +430,8 @@ ui <- page_sidebar(
           class = "text-muted",
           paste0(
             "Coeficiente = IPC del mes en ", anio_actual, " / IPC del mismo mes en ", anio_base,
-            ". Variación real = ", anio_actual, " histórico / ", anio_base,
-            " ajustado - 1. Responde a los filtros del panel lateral (el período elige el mismo mes en ambos años). Las compras por unidad son una estimación: cada mes se reparte según la participación de la unidad en las ventas."
+            ". Variación real = ", anio_actual, " (histórico) / ", anio_base,
+            " (ajustado) - 1. Responde a los filtros del panel lateral (el período elige el mismo mes en ambos años). Las compras por unidad son una estimación: cada mes se reparte según la participación de la unidad en las ventas."
           )
         )
       )
@@ -433,16 +439,16 @@ ui <- page_sidebar(
     nav_panel(
       title = "Estadísticas Descriptivas",
       card(
-        card_header("Resumen Ventas (monto neto gravado por operación)"),
+        card_header("Resumen Ventas "),
         tableOutput("tabla_desc_ventas")
       ),
       layout_columns(
         card(
-          card_header("Resumen de compras por rubro (solo mercaderías)"),
+          card_header("Resumen de compras (mercaderías)"),
           tableOutput("tabla_desc_compras")
         ),
         card(
-          card_header("Resumen de gastos por rubro"),
+          card_header("Resumen de gastos (por rubro)"),
           tableOutput("tabla_desc_gastos")
         )
       )
@@ -465,8 +471,8 @@ ui <- page_sidebar(
           tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
           tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
           tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
-          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se resta porque ya está cubierto por la planilla de gastos."),
-          tags$li("En las estadísticas descriptivas, los conceptos de la planilla de gastos se agrupan en tres rubros: Servicios (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), Contribuciones patronales (F931, AEC, FAECYS y Estrella) e Impuestos (DREI, IIBB, Impuesto al Valor Agregado, IIGG y autónomos). Los conceptos que no pertenecen a ningún grupo, como los sueldos, se muestran con su nombre original.")
+          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se incluye porque ya está cubierto por la planilla de gastos."),
+          tags$li("En las estadísticas descriptivas, los conceptos de la planilla de gastos se agrupan en tres rubros: Servicios (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), SUSS (F931, AEC, FAECYS y Estrella) e Impuestos (DREI, IIBB, Impuesto al Valor Agregado, IIGG y autónomos). Los conceptos que no pertenecen a ningún grupo, como los sueldos, se muestran con su nombre original.")
         )
       )
     )
@@ -652,10 +658,12 @@ server <- function(input, output, session) {
       geom_col(position = position_dodge(width = 0.8), width = 0.7) +
       scale_fill_manual(values = colores_unidad) +
       scale_x_discrete(drop = TRUE) +
-      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ",")) +
+      scale_y_continuous(labels = etiqueta_miles) +
       theme_minimal() +
-      theme(panel.grid.major.x = element_blank()) +
-      labs(x = NULL, y = "Rentabilidad ($)", fill = "Unidad de Negocio")
+      theme(
+        panel.grid.major.x = element_blank(),
+        axis.title.y = element_text(size = 10)) +
+      labs(x = NULL, y = "Rentabilidad (miles $)", fill = "Unidad de Negocio")
   })
   
   output$grafico_barras <- renderPlot({
@@ -668,8 +676,8 @@ server <- function(input, output, session) {
       coord_flip() +
       scale_fill_manual(values = colores_unidad) +
       theme_minimal() +
-      labs(x = NULL, y = "Ventas Netas ($)") +
-      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
+      labs(x = NULL, y = "Ventas (miles de $)") +
+      scale_y_continuous(labels = etiqueta_miles)
   })
   
   output$grafico_proveedores <- renderPlot({
@@ -685,8 +693,12 @@ server <- function(input, output, session) {
       geom_col(fill = "#e74c3c") +
       coord_flip() +
       theme_minimal() +
-      labs(x = NULL, y = "Monto Neto ($)") +
-      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
+      theme(plot.margin = margin(t = 5, r = 25, b = 5, l = 5)) +
+      labs(x = NULL, y = "Monto (miles de $)") +
+      scale_y_continuous(
+        labels = etiqueta_miles,
+        expand = expansion(mult = c(0, 0.08))
+        )
   })
   
   datos_equilibrio <- reactive({
@@ -773,7 +785,7 @@ server <- function(input, output, session) {
         "Ventas" = fmt_pesos(ventas_reales),
         "(-) Costo Mercad. Vendidas" = fmt_pesos(cmv_asignado),
         "(=) Margen de Contribución" = fmt_pesos(margen_contribucion),
-        "(-) Gastos Fijos" = fmt_pesos(gastos_fijos),
+        "(-) Gastos Operativos" = fmt_pesos(gastos_fijos),
         "(=) Resultado Neto" = fmt_pesos(resultado_neto),
         "Punto de Equilibrio ($)" = fmt_pesos(punto_equilibrio)
       )
@@ -835,7 +847,7 @@ server <- function(input, output, session) {
           str_detect(
             concepto,
             regex("F\\.?\\s?931|\\bAEC\\b|FAECYS|ESTRELLA", ignore_case = TRUE)
-          ) ~ "CONTRIBUCIONES PATRONALES",
+          ) ~ "SUSS",
           str_detect(
             concepto,
             regex("\\bDREI\\b|\\bIIBB\\b|impuesto\\s*valor\\s*agregado|\\bIVA\\b|\\bIIGG\\b|aut[oó]nomo", ignore_case = TRUE)
@@ -861,8 +873,8 @@ server <- function(input, output, session) {
       ggplot(aes(x = unidad_negocio, y = monto, fill = concepto)) +
       geom_col(position = "dodge") + theme_minimal() +
       scale_fill_manual(values = c("Ventas" = "#18bc9c", "Punto de Equilibrio" = "#2c3e50")) +
-      labs(x = NULL, y = "Monto Neto ($)", fill = NULL) +
-      scale_y_continuous(labels = dollar_format(prefix = "$", big.mark = ".", decimal.mark = ","))
+      labs(x = NULL, y = "Monto (miles de $)", fill = NULL) +
+      scale_y_continuous(labels = etiqueta_miles)
   })
   
   # --- Comparación interanual ---
@@ -903,10 +915,10 @@ server <- function(input, output, session) {
     datos <- comparacion_filtrada() %>% filter(!is.na(coef))
     req(nrow(datos) > 0)
     
-    # Montos en millones para que los ejes y las etiquetas sean legibles
+    # Montos en miles de pesos para que los ejes y las etiquetas sean legibles
     etiqueta_m <- label_number(
-      scale = 1e-6, prefix = "$", suffix = " M",
-      accuracy = 0.1, big.mark = ".", decimal.mark = ","
+      scale = 1e-3, prefix = "$",
+      accuracy = 1, big.mark = ".", decimal.mark = ","
     )
     
     datos_graf <- datos %>%
@@ -941,7 +953,7 @@ server <- function(input, output, session) {
         panel.grid.major.x = element_blank(),
         panel.grid.minor = element_blank()
       ) +
-      labs(x = NULL, y = "Monto neto (millones de $)", fill = NULL)
+      labs(x = NULL, y = "Monto (miles de $)", fill = NULL)
   })
   
   output$tabla_comparacion <- renderTable({
