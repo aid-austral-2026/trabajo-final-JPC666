@@ -95,7 +95,7 @@ shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2025")
     (emparejadas por cliente o proveedor e importe), para que no distorsionen los valores mínimo y máximo.
 - **Agrupación de gastos:** en las estadísticas descriptivas, los conceptos de la planilla de gastos se 
     agrupan en *Servicios* (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), 
-    *Contribuciones patronales* (F931, AEC, FAECYS y Estrella) e *Impuestos* (DREI, IIBB, 
+    *SUSS* (F931, AEC, FAECYS y Estrella) e *Impuestos* (DREI, IIBB, 
     Impuesto al Valor Agregado, IIGG y autónomos). 
     Los conceptos que no pertenecen a ningún grupo se muestran con su nombre original.
 
