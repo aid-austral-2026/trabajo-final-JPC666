@@ -72,7 +72,7 @@ shiny::runApp("app.R")
 Directamente desde GitHub:
 
 ```r
-shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2025")
+shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2026")
 ```
 
 ## Criterios y supuestos
@@ -99,6 +99,5 @@ shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2025")
     Impuesto al Valor Agregado, IIGG y autónomos). 
     Los conceptos que no pertenecen a ningún grupo se muestran con su nombre original.
 
-## Observaciones
 
-[completar: cualquier aclaración adicional para los docentes.]
+
