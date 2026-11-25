@@ -86,7 +86,7 @@ shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2026")
     las compras de cada mes se reparten según la participación de cada unidad en las ventas de ese mes. 
     Como consecuencia, todas las unidades tienen el mismo margen bruto, y las diferencias de rentabilidad 
     entre ellas provienen del volumen de ventas y de los gastos directos.
-- **Punto de equilibrio:** gastos fijos de la unidad divididos por el margen de contribución global 
+- **Punto de equilibrio:** gastos operativos de la unidad divididos por el margen de contribución global 
     (porcentaje de las ventas que no se destina a mercadería).
 - **Comparación interanual:** cada mes de 2025 se multiplica por el coeficiente IPC 
     (IPC del mes en 2026 / IPC del mismo mes en 2025) y se compara contra el valor histórico de 2026. 

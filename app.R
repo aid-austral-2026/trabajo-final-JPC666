@@ -308,6 +308,14 @@ sumar_mensual <- function(df, columna, por_unidad = TRUE) {
 # así que cada mes se reparte según la participación de cada unidad en las ventas de ese
 # mes (mismo criterio que el CMV del Punto de Equilibrio). Es una estimación.
 # Solo se consideran las compras del rubro mercadería (rubros_mercaderia).
+
+# Participación de cada unidad en las ventas de cada mes (criterio de reparto)
+participacion_mensual <- sumar_mensual(ventas_todas, "neto_gravado") %>%
+  group_by(periodo) %>%
+  mutate(participacion = if (sum(monto) > 0) monto / sum(monto) else NA_real_) %>%
+  ungroup() %>%
+  select(periodo, unidad_negocio, participacion)
+
 compras_por_unidad <- inner_join(
   sumar_mensual(
     compras_todas %>% filter(rubro %in% rubros_mercaderia),
@@ -315,11 +323,7 @@ compras_por_unidad <- inner_join(
     por_unidad = FALSE
   ) %>%
     select(periodo, monto_compras = monto),
-  sumar_mensual(ventas_todas, "neto_gravado") %>%
-    group_by(periodo) %>%
-    mutate(participacion = if (sum(monto) > 0) monto / sum(monto) else NA_real_) %>%
-    ungroup() %>%
-    select(periodo, unidad_negocio, participacion),
+  participacion_mensual,
   by = "periodo"
 ) %>%
   transmute(periodo, unidad_negocio, monto = monto_compras * participacion)
@@ -439,13 +443,17 @@ ui <- page_sidebar(
     nav_panel(
       title = "Estadísticas Descriptivas",
       card(
-        card_header("Resumen Ventas "),
+        card_header("Resumen Ventas"),
         tableOutput("tabla_desc_ventas")
       ),
       layout_columns(
         card(
           card_header("Resumen de compras (mercaderías)"),
-          tableOutput("tabla_desc_compras")
+          tableOutput("tabla_desc_compras"),
+          p(
+            class = "text-muted",
+            "Con una unidad seleccionada, los importes se asignan según la participación de la unidad en las ventas de cada mes (estimación). La cantidad de operaciones corresponde al total de compras del período."
+          )
         ),
         card(
           card_header("Resumen de gastos (por rubro)"),
@@ -468,7 +476,7 @@ ui <- page_sidebar(
           tags$li("Omisión de encabezados institucionales superiores y filtrado de filas de totales y conceptos impositivos duplicados (IVA)."),
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
           tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldán."),
-          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
+          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos operativos tomados de la planilla de gastos por unidad."),
           tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
           tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
           tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se incluye porque ya está cubierto por la planilla de gastos."),
@@ -698,7 +706,7 @@ server <- function(input, output, session) {
       scale_y_continuous(
         labels = etiqueta_miles,
         expand = expansion(mult = c(0, 0.08))
-        )
+      )
   })
   
   datos_equilibrio <- reactive({
@@ -812,9 +820,24 @@ server <- function(input, output, session) {
   })
   
   output$tabla_desc_compras <- renderTable({
-    req(nrow(compras_desc() %>% filter(rubro %in% rubros_mercaderia)) > 0)
-    compras_desc() %>%
-      filter(rubro %in% rubros_mercaderia) %>%
+    req(input$filtro_unidad)
+    datos <- compras_desc() %>% filter(rubro %in% rubros_mercaderia)
+    req(nrow(datos) > 0)
+    
+    # Con una unidad seleccionada, cada compra se asigna según la participación
+    # de esa unidad en las ventas del mes de la compra (estimación)
+    if (!input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+      datos <- datos %>%
+        left_join(
+          participacion_mensual %>%
+            filter(unidad_negocio == input$filtro_unidad) %>%
+            select(periodo, participacion),
+          by = "periodo"
+        ) %>%
+        mutate(neto_gravado = neto_gravado * replace_na(participacion, 0))
+    }
+    
+    datos %>%
       group_by(rubro) %>%
       summarise(
         Operaciones = n(),
@@ -831,7 +854,7 @@ server <- function(input, output, session) {
       rename(Rubro = rubro)
   })
   
-  # Resumen de gastos agrupado en SERVICIOS, CONTRIBUCIONES PATRONALES e IMPUESTOS.
+  # Resumen de gastos agrupado en SERVICIOS, SUSS e IMPUESTOS.
   # Los conceptos que no entran en ningún grupo (por ejemplo SUELDOS) conservan su nombre.
   # Responde a los filtros de período y unidad de negocio.
   output$tabla_desc_gastos <- renderTable({
