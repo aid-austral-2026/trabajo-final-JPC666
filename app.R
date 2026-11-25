@@ -102,12 +102,32 @@ excluir_nc_y_facturas <- function(df, col_id) {
 # El rubro "Varios" no se suma como gasto: ya está cubierto por la planilla de gastos.
 rubros_mercaderia <- c("Mercaderias")
 
+# Tablas vacías con la estructura esperada. Se usan cuando no se detecta ningún
+# archivo válido, para que el resto del código no falle por columnas inexistentes
+# y la aplicación muestre el aviso de carga en lugar de cortarse.
+vacio_ventas <- tibble(
+  archivo = character(), fecha = as.Date(character()), periodo = character(),
+  tipo = character(), punto_venta = numeric(), comprobante = character(),
+  cliente = character(), categoria = character(), cuit = character(),
+  neto_no_gravado = numeric(), neto_gravado = numeric(), iva_21 = numeric(),
+  total = numeric(), unidad_negocio = character()
+)
+
+vacio_compras <- tibble(
+  archivo = character(), fecha = as.Date(character()), periodo = character(),
+  tipo = character(), comprobante = character(), provincia = character(),
+  proveedor = character(), rubro = character(), neto_gravado = numeric(),
+  iva_21 = numeric(), perc_iibb = numeric(), perc_iva = numeric(),
+  total = numeric()
+)
+
 # Función para Limpiar Ventas
 procesar_archivo_ventas <- function(ruta_archivo) {
   tryCatch({
     read_excel(ruta_archivo, skip = 3, col_types = "text", .name_repair = "unique_quiet") %>%
       filter(!is.na(Fecha), !is.na(Numero), Fecha != "Totales:") %>%
       transmute(
+        archivo = basename(ruta_archivo),
         fecha = parsear_fecha_excel(Fecha),
         periodo = format(fecha, "%Y-%m"),
         tipo = Tipo,
@@ -130,7 +150,7 @@ procesar_archivo_ventas <- function(ruta_archivo) {
       filter(!is.na(fecha))
   }, error = function(e) {
     message(paste("ERROR EN VENTAS ->", ruta_archivo, ":", conditionMessage(e)))
-    tibble()
+    vacio_ventas
   })
 }
 
@@ -145,6 +165,7 @@ procesar_archivo_compras <- function(ruta_archivo) {
     
     df_raw %>%
       transmute(
+        archivo = basename(ruta_archivo),
         fecha = parsear_fecha_excel(Fecha),
         periodo = format(fecha, "%Y-%m"),
         tipo = Tipo,
@@ -161,7 +182,7 @@ procesar_archivo_compras <- function(ruta_archivo) {
       filter(!is.na(fecha))
   }, error = function(e) {
     message(paste("ERROR EN COMPRAS ->", ruta_archivo, ":", conditionMessage(e)))
-    tibble()
+    vacio_compras
   })
 }
 
@@ -184,12 +205,12 @@ procesar_archivo_gastos <- function(ruta_archivo) {
     }
     
     df_raw %>%
-      mutate(periodo = periodo_archivo) %>%
+      mutate(periodo = periodo_archivo, archivo = basename(ruta_archivo)) %>%
       filter(
         !is.na(concepto),
         !toupper(trimws(concepto)) %in% c("CONCEPTOS", "CONCEPTO", "TOTALES", "TOTAL", "IVA")
       ) %>%
-      select(periodo, concepto, `3`, `5`, `8`) %>%
+      select(archivo, periodo, concepto, `3`, `5`, `8`) %>%
       pivot_longer(
         cols = c(`3`, `5`, `8`),
         names_to = "punto_venta",
@@ -224,9 +245,73 @@ archivos_ventas <- list.files(path = "datos/ventas", pattern = "^[^~].*\\.xlsx?$
 archivos_compras <- list.files(path = "datos/compras", pattern = "^[^~].*\\.xlsx?$", full.names = TRUE, ignore.case = TRUE)
 archivos_gastos <- list.files(path = "datos/gastos", pattern = "^[^~].*\\.xlsx?$", full.names = TRUE, ignore.case = TRUE)
 
-ventas_todas <- map(archivos_ventas, procesar_archivo_ventas) %>% list_rbind()
-compras_todas <- map(archivos_compras, procesar_archivo_compras) %>% list_rbind()
+# --- Control de archivos duplicados ----------------------------------------------
+# Un archivo es duplicado si tiene exactamente el mismo contenido (misma huella
+# MD5) que otro de la misma carpeta. Se conserva el primero (orden alfabético) y
+# los demás se excluyen para no contar dos veces los mismos datos.
+separar_duplicados <- function(archivos, carpeta) {
+  vacio <- tibble(carpeta = character(), archivo = character(), igual_a = character())
+  if (length(archivos) == 0) return(list(unicos = archivos, excluidos = vacio))
+  
+  huella <- unname(tools::md5sum(archivos))
+  es_duplicado <- duplicated(huella)
+  
+  excluidos <- tibble(
+    carpeta = carpeta,
+    archivo = basename(archivos[es_duplicado]),
+    igual_a = basename(archivos[match(huella[es_duplicado], huella)])
+  )
+  list(unicos = archivos[!es_duplicado], excluidos = excluidos)
+}
+
+control_ventas <- separar_duplicados(archivos_ventas, "ventas")
+control_compras <- separar_duplicados(archivos_compras, "compras")
+control_gastos <- separar_duplicados(archivos_gastos, "gastos")
+
+archivos_ventas <- control_ventas$unicos
+archivos_compras <- control_compras$unicos
+archivos_gastos <- control_gastos$unicos
+
+archivos_excluidos <- bind_rows(
+  control_ventas$excluidos,
+  control_compras$excluidos,
+  control_gastos$excluidos
+)
+if (nrow(archivos_excluidos) > 0) {
+  message(
+    "ARCHIVOS DUPLICADOS EXCLUIDOS -> ",
+    paste0(archivos_excluidos$carpeta, "/", archivos_excluidos$archivo, collapse = ", ")
+  )
+}
+
+ventas_todas <- bind_rows(vacio_ventas, map(archivos_ventas, procesar_archivo_ventas) %>% list_rbind())
+compras_todas <- bind_rows(vacio_compras, map(archivos_compras, procesar_archivo_compras) %>% list_rbind())
 gastos_todos <- map(archivos_gastos, procesar_archivo_gastos) %>% list_rbind()
+
+# Dos archivos con contenido distinto pueden corresponder al mismo mes (por ejemplo,
+# una versión corregida). No se excluyen, pero se avisa para que se revise.
+# Se toma el período con más registros de cada archivo como su período principal.
+periodos_repetidos <- function(df, carpeta) {
+  vacio <- tibble(carpeta = character(), periodo = character(), archivos = character())
+  if (nrow(df) == 0 || !"archivo" %in% names(df)) return(vacio)
+  
+  df %>%
+    count(archivo, periodo) %>%
+    group_by(archivo) %>%
+    slice_max(n, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    group_by(periodo) %>%
+    filter(n() > 1) %>%
+    summarise(archivos = paste(archivo, collapse = " / "), .groups = "drop") %>%
+    mutate(carpeta = carpeta) %>%
+    select(carpeta, periodo, archivos)
+}
+
+periodos_duplicados <- bind_rows(
+  periodos_repetidos(ventas_todas, "ventas"),
+  periodos_repetidos(compras_todas, "compras"),
+  periodos_repetidos(gastos_todos, "gastos")
+)
 
 # Años de la comparación interanual:
 # anio_base se ajusta por IPC; anio_actual se muestra a valores históricos
@@ -371,6 +456,7 @@ ui <- page_sidebar(
   ),
   
   uiOutput("alerta_carga"),
+  uiOutput("alerta_duplicados"),
   
   navset_card_underline(
     nav_panel(
@@ -473,10 +559,11 @@ ui <- page_sidebar(
         card_header("b. Limpieza y Transformación de Datos"),
         tags$ul(
           tags$li("Ingesta automatizada en lote desde rutas relativas (datos/ventas, datos/compras y datos/gastos), ignorando archivos temporales."),
+          tags$li("Control de archivos duplicados: dentro de cada carpeta se comparan los archivos por su contenido (huella MD5) y se excluyen los idénticos, conservando el primero. Si dos archivos distintos corresponden al mismo mes, la aplicación muestra un aviso para su revisión."),
           tags$li("Omisión de encabezados institucionales superiores y filtrado de filas de totales y conceptos impositivos duplicados (IVA)."),
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
           tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldán."),
-          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos operativos tomados de la planilla de gastos por unidad."),
+          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
           tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
           tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
           tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se incluye porque ya está cubierto por la planilla de gastos."),
@@ -500,6 +587,41 @@ server <- function(input, output, session) {
     } else {
       NULL
     }
+  })
+  
+  # Avisos del control de duplicados (se calculan una sola vez al cargar los datos)
+  output$alerta_duplicados <- renderUI({
+    avisos <- list()
+    
+    if (nrow(archivos_excluidos) > 0) {
+      avisos <- c(avisos, list(div(
+        class = "alert alert-info",
+        tags$strong("Archivos duplicados excluidos: "),
+        "se usó solo el primero de cada grupo de archivos idénticos.",
+        tags$ul(lapply(seq_len(nrow(archivos_excluidos)), function(i) {
+          tags$li(paste0(
+            archivos_excluidos$carpeta[i], "/", archivos_excluidos$archivo[i],
+            " (igual a ", archivos_excluidos$igual_a[i], ")"
+          ))
+        }))
+      )))
+    }
+    
+    if (nrow(periodos_duplicados) > 0) {
+      avisos <- c(avisos, list(div(
+        class = "alert alert-warning",
+        tags$strong("Revisar: "),
+        "hay archivos distintos que corresponden al mismo mes, por lo que los datos de ese mes podrían estar duplicados.",
+        tags$ul(lapply(seq_len(nrow(periodos_duplicados)), function(i) {
+          tags$li(paste0(
+            periodos_duplicados$carpeta[i], " (", periodos_duplicados$periodo[i], "): ",
+            periodos_duplicados$archivos[i]
+          ))
+        }))
+      )))
+    }
+    
+    if (length(avisos) == 0) NULL else tagList(avisos)
   })
   
   output$selector_periodo <- renderUI({
