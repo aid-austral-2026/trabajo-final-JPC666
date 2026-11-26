@@ -12,7 +12,7 @@ La aplicación evalúa la rentabilidad comercial, la estructura de costos y el p
 
 Pestañas de la aplicación:
 
-1. **Tablero de Rentabilidad:** ventas, compras de mercadería y gastos operativos; evolución mensual de la rentabilidad por unidad de negocio; ventas por unidad; y top 5 de proveedores de mercadería.
+1. **Rentabilidad:** ventas, compras de mercadería y gastos operativos; evolución mensual de la rentabilidad por unidad de negocio; ventas por unidad; y top 5 de proveedores de mercadería.
 2. **Punto de Equilibrio:** ventas vs. punto de equilibrio por unidad, y tabla de márgenes de contribución.
 3. **Comparación Interanual (IPC):** ventas, compras y gastos de 2025 ajustados por IPC contra 2026 a valores históricos, con la variación real mes a mes.
 4. **Estadísticas Descriptivas:** medidas descriptivas de las ventas, resumen de compras de mercadería y resumen de gastos agrupados.
@@ -26,15 +26,15 @@ Los filtros del panel lateral (período mensual y unidad de negocio) permiten ex
 |---|---|
 | Selección | Pestaña "Metodología" (tarjeta a) y sección *Fuente de los datos* de este README |
 | Limpieza | Pestaña "Metodología" (tarjeta b) y sección 2 del código (`app.R`) |
-| Exploración | Tablero, punto de equilibrio, comparación interanual y estadísticas descriptivas, con filtros dinámicos |
+| Exploración | Rentabilidad, punto de equilibrio, comparación interanual y estadísticas descriptivas, con filtros dinámicos |
 | Comunicación | Aplicación Shiny con tema `bslib` |
 
 ## Fuente de los datos
 
 - **IVA Ventas e IVA Compras:** libros contables mensuales de IVA (AFIP), exportados a Excel desde el ERP del comercio.
-- **Planillas de gastos operativos:** planillas mensuales de gastos asignados por punto de venta, generados con carga manual por el comercio.
+- **Planillas de gastos operativos:** planillas mensuales de gastos asignados por punto de venta, cargadas manualmente por el comercio.
 - **IPC:** índice de precios al consumidor, nivel general nacional, publicado por el INDEC.
-- **Período cubierto:** 2025 y 2026 [desde 01/2025 hasta 10/2026]. Los datos de 2026 alimentan el tablero, el punto de equilibrio y las estadísticas descriptivas; los de 2025 se usan solo en la comparación interanual.
+- **Período cubierto:** 2025 y 2026 [desde enero/2025 hasta octubre/2026]. Los datos de 2026 alimentan el tablero, el punto de equilibrio y las estadísticas descriptivas; los de 2025 se usan solo en la comparación interanual.
 
 ### Nota sobre los datos
 
@@ -79,15 +79,15 @@ shiny::runGitHub("trabajo-final-JPC666", "aid-austral-2026")
 
 - **Unidades de negocio:** se asignan según el punto de venta (emisor): 3 y 6 corresponden a Rosario, 
     5 y 7 a Funes y 8 a Roldán.
-- **Rentabilidad:** ventas netas gravadas menos compras de mercadería menos gastos operativos. 
+- **Rentabilidad:** ventas netas gravadas menos compras netas gravadas menos gastos operativos. 
     Solo se consideran las compras del rubro *Mercaderias*; el rubro *Varios* no se resta porque ya está 
     cubierto por la planilla de gastos.
 - **Compras por unidad (estimación):** el libro de IVA Compras no informa la unidad de negocio, por lo que 
     las compras de cada mes se reparten según la participación de cada unidad en las ventas de ese mes. 
-    Como consecuencia, todas las unidades tienen el mismo margen bruto, y las diferencias de rentabilidad 
-    entre ellas provienen del volumen de ventas y de los gastos directos.
-- **Punto de equilibrio:** gastos operativos de la unidad divididos por el margen de contribución global 
-    (porcentaje de las ventas que no se destina a mercadería).
+    En cada mes, todas las unidades tienen el mismo margen bruto; en el acumulado difieren levemente, 
+    y las diferencias de rentabilidad entre ellas provienen del volumen de ventas y de los gastos operativos (directos).
+- **Punto de equilibrio:** gastos operativos de la unidad divididos por el margen de contribución global, (ventas − CMV) / ventas del período. 
+    Se usa un margen único porque las compras no se registran por unidad
 - **Comparación interanual:** cada mes de 2025 se multiplica por el coeficiente IPC 
     (IPC del mes en 2026 / IPC del mismo mes en 2025) y se compara contra el valor histórico de 2026. 
     Solo se comparan los meses con datos en ambos años.

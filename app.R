@@ -2,7 +2,7 @@
 # TRABAJO FINAL: ANÁLISIS INTELIGENTE DE DATOS (2026)
 # PRODUCTO: Aplicación Web Shiny Multi-Período para Rentabilidad Comercial
 # DATASET: IVA Compras, IVA Ventas y Gastos Operativos (.xlsx)
-# INTEGRANTES / AUTOR: CALVINO JOAQUIN PABLO
+# AUTOR: CALVINO JOAQUIN PABLO
 # ==============================================================================
 
 # 1. CARGA DE PAQUETES Y CONFIGURACIÓN -----------------------------------------
@@ -46,6 +46,16 @@ parsear_fecha_excel <- function(col_fecha) {
     !is.na(num_fecha),
     as.Date(num_fecha, origin = "1899-12-30"),
     fecha_texto
+  )
+}
+
+# Asigna cada punto de venta (emisor) a su unidad de negocio
+asignar_unidad <- function(punto_venta) {
+  case_when(
+    punto_venta %in% c(3, 6) ~ "Rosario",
+    punto_venta %in% c(5, 7) ~ "Funes",
+    punto_venta == 8 ~ "Roldán",
+    TRUE ~ "Otros"
   )
 }
 
@@ -97,6 +107,16 @@ excluir_nc_y_facturas <- function(df, col_id) {
     select(-starts_with("."))
 }
 
+# Filtra una tabla por período y, si se indica, por unidad de negocio
+filtrar <- function(df, per, unidad = NULL) {
+  if (nrow(df) == 0) return(df)
+  if (per != "Todos los Meses") df <- filter(df, periodo == per)
+  if (!is.null(unidad) && unidad != "Todas las Unidades") {
+    df <- filter(df, unidad_negocio == unidad)
+  }
+  df
+}
+
 # Rubros de compras que se consideran costo de mercadería vendida (CMV).
 # En los libros de compras el rubro viene sin tilde ("Mercaderias").
 # El rubro "Varios" no se suma como gasto: ya está cubierto por la planilla de gastos.
@@ -140,12 +160,7 @@ procesar_archivo_ventas <- function(ruta_archivo) {
         neto_gravado = suppressWarnings(as.numeric(`Neto Gravado`)),
         iva_21 = suppressWarnings(as.numeric(`IVA 21.00%`)),
         total = suppressWarnings(as.numeric(Total)),
-        unidad_negocio = case_when(
-          punto_venta %in% c(3, 6) ~ "Rosario",
-          punto_venta %in% c(5, 7) ~ "Funes",
-          punto_venta == 8 ~ "Roldán",
-          TRUE ~ "Otros"
-        )
+        unidad_negocio = asignar_unidad(punto_venta)
       ) %>%
       filter(!is.na(fecha))
   }, error = function(e) {
@@ -220,12 +235,7 @@ procesar_archivo_gastos <- function(ruta_archivo) {
         concepto = trimws(concepto),
         punto_venta = suppressWarnings(as.numeric(punto_venta)),
         monto = suppressWarnings(as.numeric(monto)),
-        unidad_negocio = case_when(
-          punto_venta %in% c(3, 6) ~ "Rosario",
-          punto_venta %in% c(5, 7) ~ "Funes",
-          punto_venta == 8 ~ "Roldán",
-          TRUE ~ "Otros"
-        )
+        unidad_negocio = asignar_unidad(punto_venta)
       ) %>%
       filter(!is.na(monto), monto != 0)
   }, error = function(e) {
@@ -323,7 +333,7 @@ solo_anio <- function(df, anio) {
   df %>% filter(substr(periodo, 1, 4) == as.character(anio))
 }
 
-# El tablero, el punto de equilibrio y las estadísticas descriptivas
+# La rentabilidad, el punto de equilibrio y las estadísticas descriptivas
 # trabajan solo con el año actual; los archivos de 2025 van a la comparación
 ventas_limpias <- solo_anio(ventas_todas, anio_actual)
 compras_limpias <- solo_anio(compras_todas, anio_actual)
@@ -391,7 +401,8 @@ sumar_mensual <- function(df, columna, por_unidad = TRUE) {
 
 # Compras de mercadería por unidad: el libro de IVA Compras no trae la unidad de negocio,
 # así que cada mes se reparte según la participación de cada unidad en las ventas de ese
-# mes (mismo criterio que el CMV del Punto de Equilibrio). Es una estimación.
+# mes. Es una estimación. Este es el único criterio de reparto de la aplicación: lo usan
+# la rentabilidad, la comparación interanual y el CMV del Punto de Equilibrio. 
 # Solo se consideran las compras del rubro mercadería (rubros_mercaderia).
 
 # Participación de cada unidad en las ventas de cada mes (criterio de reparto)
@@ -413,7 +424,7 @@ compras_por_unidad <- inner_join(
 ) %>%
   transmute(periodo, unidad_negocio, monto = monto_compras * participacion)
 
-# Totales mensuales de todos los años cargados (mismos criterios que los KPI del tablero)
+# Totales mensuales de todos los años cargados (mismos criterios que los KPI de la Rentabilidad)
 resumen_mensual <- bind_rows(
   sumar_mensual(ventas_todas, "neto_gravado") %>% mutate(concepto = "Ventas"),
   compras_por_unidad %>% mutate(concepto = "Compras"),
@@ -445,23 +456,41 @@ armar_comparacion <- function(resumen) {
 }
 
 # 3. INTERFAZ DE USUARIO (UI) --------------------------------------------------
+# Los datos se cargan antes de definir la UI, por eso los selectores se
+# arman directamente acá (sin renderUI).
 ui <- page_sidebar(
   theme = mi_tema,
   title = "Control de Gestión: Rentabilidad por Unidades de Negocio",
   
   sidebar = sidebar(
     title = "Filtros de Exploración",
-    uiOutput("selector_periodo"),
-    uiOutput("selector_unidad")
+    selectInput(
+      "filtro_periodo", "Seleccionar Período Mensual:",
+      choices = c("Todos los Meses", sort(unique(ventas_limpias$periodo), decreasing = TRUE))
+    ),
+    selectInput(
+      "filtro_unidad", "Filtrar por Unidad de Negocio:",
+      choices = c("Todas las Unidades", sort(unique(ventas_limpias$unidad_negocio)))
+    )
   ),
+  
+  # Sin barras de scroll dentro de los recuadros de Ventas, Compras y Gastos
+  tags$head(tags$style(HTML("
+    .bslib-value-box, .bslib-value-box .card-body { overflow: hidden !important; }
+    .bslib-value-box { min-height: 0 !important; }
+    .bslib-value-box .value-box-area { padding: 0; }
+    .bslib-value-box .value-box-title { font-size: 0.85rem; margin: 0; }
+    .bslib-value-box .value-box-value { font-size: 2rem; margin: 0; }
+  "))),
   
   uiOutput("alerta_carga"),
   uiOutput("alerta_duplicados"),
   
   navset_card_underline(
     nav_panel(
-      title = "Tablero de Rentabilidad",
+      title = "Rentabilidad",
       layout_columns(
+        fill = FALSE,
         value_box(
           title = "Ventas",
           value = textOutput("txt_ventas"),
@@ -521,7 +550,8 @@ ui <- page_sidebar(
           paste0(
             "Coeficiente = IPC del mes en ", anio_actual, " / IPC del mismo mes en ", anio_base,
             ". Variación real = ", anio_actual, " (histórico) / ", anio_base,
-            " (ajustado) - 1. Responde a los filtros del panel lateral (el período elige el mismo mes en ambos años). Las compras por unidad son una estimación: cada mes se reparte según la participación de la unidad en las ventas."
+            " (ajustado) - 1. Responde a los filtros del panel lateral (el período elige el mismo mes en ambos años). 
+            Las compras por unidad son una estimación: cada mes se reparte según la participación de la unidad en las ventas."
           )
         )
       )
@@ -529,7 +559,7 @@ ui <- page_sidebar(
     nav_panel(
       title = "Estadísticas Descriptivas",
       card(
-        card_header("Resumen Ventas"),
+        card_header("Resumen de Ventas"),
         tableOutput("tabla_desc_ventas")
       ),
       layout_columns(
@@ -538,7 +568,8 @@ ui <- page_sidebar(
           tableOutput("tabla_desc_compras"),
           p(
             class = "text-muted",
-            "Con una unidad seleccionada, los importes se asignan según la participación de la unidad en las ventas de cada mes (estimación). La cantidad de operaciones corresponde al total de compras del período."
+            "Con una unidad seleccionada, los importes se asignan según la participación de la unidad en las ventas de cada mes (estimación). 
+            La cantidad de operaciones corresponde al total de compras del período."
           )
         ),
         card(
@@ -553,21 +584,26 @@ ui <- page_sidebar(
         card_header("a. Selección de Datos y Problema en Estudio"),
         p("El objetivo de esta aplicación es evaluar la rentabilidad comercial, la estructura de costos y el punto de equilibrio multi-período por unidad de negocio."),
         p("Fuentes de datos: Libros contables mensuales de IVA Ventas e IVA Compras (AFIP) y planillas mensuales de gastos operativos directos asignados por unidad de negocio (datos/ventas, datos/compras y datos/gastos)."),
-        p("Para la comparación interanual se usa además el índice de precios al consumidor (IPC), nivel general nacional, publicado por el INDEC (datos/ipc). Se cargan los períodos de 2025 y 2026: los de 2026 alimentan el tablero, el punto de equilibrio y las estadísticas descriptivas, y los de 2025 se usan solo en la comparación interanual.")
+        p("Para la comparación interanual se usa además el índice de precios al consumidor (IPC), nivel general nacional, publicado por el INDEC (datos/ipc). Se cargan los períodos de 2025 y 2026: los de 2026 alimentan la rentabilidad, el punto de equilibrio y las estadísticas descriptivas, y los de 2025 se usan solo en la comparación interanual.")
       ),
       card(
         card_header("b. Limpieza y Transformación de Datos"),
         tags$ul(
           tags$li("Ingesta automatizada en lote desde rutas relativas (datos/ventas, datos/compras y datos/gastos), ignorando archivos temporales."),
-          tags$li("Control de archivos duplicados: dentro de cada carpeta se comparan los archivos por su contenido (huella MD5) y se excluyen los idénticos, conservando el primero. Si dos archivos distintos corresponden al mismo mes, la aplicación muestra un aviso para su revisión."),
+          tags$li("Control de archivos duplicados: dentro de cada carpeta se comparan los archivos por su contenido (huella MD5) y se excluyen los idénticos, conservando el primero. 
+                  Si dos archivos distintos corresponden al mismo mes, la aplicación muestra un aviso para su revisión."),
           tags$li("Omisión de encabezados institucionales superiores y filtrado de filas de totales y conceptos impositivos duplicados (IVA)."),
           tags$li("Normalización de fechas seriales de Excel y formatos mixtos hacia estándar ISO (AAAA-MM-DD) para extracción de períodos mensuales."),
           tags$li("Agrupación de puntos de venta: Emisores 3 y 6 como Rosario, Emisores 5 y 7 como Funes, y Emisor 8 como Roldán."),
-          tags$li("Cálculo del Punto de Equilibrio combinando el margen de contribución sobre mercaderías, el CMV repartido por participación en ventas y los gastos fijos tomados de la planilla de gastos por unidad."),
+          tags$li("Cálculo del Punto de Equilibrio: los gastos operativos de cada unidad (planilla de gastos) divididos por el margen de contribución global, es decir, (ventas − CMV) / ventas del período. 
+                  Se usa un margen único porque las compras de mercadería no se registran por unidad. 
+                  El CMV que se muestra por unidad es una estimación, repartida mes a mes según la participación de la unidad en las ventas."),
           tags$li("En las estadísticas descriptivas se excluyen las notas de crédito y las facturas asociadas, emparejadas por cliente/proveedor e importe, para que no distorsionen los valores mínimo y máximo."),
           tags$li("Los archivos de 2025 se cargan junto con los de 2026 pero se usan solo en la comparación interanual: cada mes de 2025 se ajusta por el coeficiente IPC (nivel general nacional, INDEC) del mismo mes de 2026 y se compara contra el valor histórico de 2026."),
-          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras de mercadería (rubro Mercaderias) menos gastos operativos. Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se incluye porque ya está cubierto por la planilla de gastos."),
-          tags$li("En las estadísticas descriptivas, los conceptos de la planilla de gastos se agrupan en tres rubros: Servicios (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), SUSS (F931, AEC, FAECYS y Estrella) e Impuestos (DREI, IIBB, Impuesto al Valor Agregado, IIGG y autónomos). Los conceptos que no pertenecen a ningún grupo, como los sueldos, se muestran con su nombre original.")
+          tags$li("La rentabilidad mensual por unidad se calcula como ventas netas gravadas menos compras netas gravadas (rubro Mercaderias) menos gastos operativos. 
+                  Las compras se asignan a cada unidad según su participación en las ventas del mes (estimación); el rubro Varios no se incluye porque ya está cubierto por la planilla de gastos."),
+          tags$li("En las estadísticas descriptivas, los conceptos de la planilla de gastos se agrupan en tres rubros: Servicios (EPE, telefonía, internet, alarmas, limpieza, Sinergia, refrigerios y varios), SUSS (F931, AEC, FAECYS y Estrella) e 
+                  Impuestos (DREI, IIBB, Impuesto al Valor Agregado, IIGG y autónomos). Los conceptos que no pertenecen a ningún grupo, como los sueldos, se muestran con su nombre original.")
         )
       )
     )
@@ -624,136 +660,45 @@ server <- function(input, output, session) {
     if (length(avisos) == 0) NULL else tagList(avisos)
   })
   
-  output$selector_periodo <- renderUI({
-    if (nrow(ventas_limpias) == 0) {
-      return(selectInput("filtro_periodo", "Seleccionar Período Mensual:", choices = "Sin Datos"))
-    }
-    periodos_disponibles <- unique(ventas_limpias$periodo) %>% sort(decreasing = TRUE)
-    selectInput(
-      "filtro_periodo",
-      "Seleccionar Período Mensual:",
-      choices = c("Todos los Meses", periodos_disponibles),
-      selected = "Todos los Meses"
-    )
-  })
-  
-  output$selector_unidad <- renderUI({
-    if (nrow(ventas_limpias) == 0) {
-      return(selectInput("filtro_unidad", "Filtrar por Unidad de Negocio:", choices = "Sin Datos"))
-    }
-    selectInput(
-      "filtro_unidad",
-      "Filtrar por Unidad de Negocio:",
-      choices = c("Todas las Unidades", unique(ventas_limpias$unidad_negocio)),
-      selected = "Todas las Unidades"
-    )
-  })
-  
-  ventas_filtradas <- reactive({
-    req(input$filtro_periodo, input$filtro_unidad)
-    df <- ventas_limpias
-    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      df <- df %>% filter(periodo == input$filtro_periodo)
-    }
-    if (input$filtro_unidad != "Todas las Unidades") {
-      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
-    }
-    df
-  })
-  
-  compras_filtradas <- reactive({
-    req(input$filtro_periodo)
-    df <- compras_limpias
-    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      df <- df %>% filter(periodo == input$filtro_periodo)
-    }
-    df
-  })
-  
-  gastos_filtrados <- reactive({
-    req(input$filtro_periodo, input$filtro_unidad)
-    df <- gastos_limpios
-    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      df <- df %>% filter(periodo == input$filtro_periodo)
-    }
-    if (input$filtro_unidad != "Todas las Unidades") {
-      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
-    }
-    df
-  })
+  # Datos filtrados por período (y unidad de negocio, cuando la tabla la tiene)
+  ventas_filtradas  <- reactive(filtrar(ventas_limpias, input$filtro_periodo, input$filtro_unidad))
+  compras_filtradas <- reactive(filtrar(compras_limpias, input$filtro_periodo))
+  gastos_filtrados  <- reactive(filtrar(gastos_limpios, input$filtro_periodo, input$filtro_unidad))
   
   # Ventas y compras sin NC ni facturas asociadas (para estadísticas descriptivas)
-  ventas_desc <- reactive({
-    req(input$filtro_periodo, input$filtro_unidad)
-    df <- ventas_sin_nc
-    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      df <- df %>% filter(periodo == input$filtro_periodo)
-    }
-    if (input$filtro_unidad != "Todas las Unidades") {
-      df <- df %>% filter(unidad_negocio == input$filtro_unidad)
-    }
-    df
-  })
-  
-  compras_desc <- reactive({
-    req(input$filtro_periodo)
-    df <- compras_sin_nc
-    if (nrow(df) == 0 || input$filtro_periodo == "Sin Datos") return(df)
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      df <- df %>% filter(periodo == input$filtro_periodo)
-    }
-    df
-  })
+  ventas_desc  <- reactive(filtrar(ventas_sin_nc, input$filtro_periodo, input$filtro_unidad))
+  compras_desc <- reactive(filtrar(compras_sin_nc, input$filtro_periodo))
   
   output$txt_ventas <- renderText({
-    if (nrow(ventas_filtradas()) == 0) return("$0,00")
-    dollar(sum(ventas_filtradas()$neto_gravado, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
+    fmt_pesos(sum(ventas_filtradas()$neto_gravado, na.rm = TRUE))
   })
   
   # Compras de mercadería. Con una unidad seleccionada se usa la estimación por
   # participación en las ventas del mes (las compras no traen unidad de negocio).
   output$txt_compras_netas <- renderText({
-    req(input$filtro_periodo, input$filtro_unidad)
-    
-    total <- if (input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+    total <- if (input$filtro_unidad == "Todas las Unidades") {
       compras_filtradas() %>%
         filter(rubro %in% rubros_mercaderia) %>%
         pull(neto_gravado) %>%
         sum(na.rm = TRUE)
     } else {
-      df <- compras_por_unidad %>%
-        filter(
-          substr(periodo, 1, 4) == as.character(anio_actual),
-          unidad_negocio == input$filtro_unidad
-        )
-      if (input$filtro_periodo != "Todos los Meses") {
-        df <- df %>% filter(periodo == input$filtro_periodo)
-      }
-      sum(df$monto, na.rm = TRUE)
+      compras_por_unidad %>%
+        filter(substr(periodo, 1, 4) == as.character(anio_actual)) %>%
+        filtrar(input$filtro_periodo, input$filtro_unidad) %>%
+        pull(monto) %>%
+        sum(na.rm = TRUE)
     }
     
-    dollar(total, prefix = "$", big.mark = ".", decimal.mark = ",")
+    fmt_pesos(total)
   })
   
   output$txt_gastos <- renderText({
-    if (nrow(gastos_filtrados()) == 0) return("$0,00")
-    dollar(sum(gastos_filtrados()$monto, na.rm = TRUE), prefix = "$", big.mark = ".", decimal.mark = ",")
+    fmt_pesos(sum(gastos_filtrados()$monto, na.rm = TRUE))
   })
   
   # Evolución mensual de rentabilidad = ventas - compras de mercadería (estimadas
   # por unidad) - gastos operativos
   output$grafico_rentabilidad <- renderPlot({
-    req(input$filtro_periodo, input$filtro_unidad)
-    
     datos <- resumen_mensual %>%
       filter(anio == as.character(anio_actual), !is.na(unidad_negocio)) %>%
       pivot_wider(
@@ -767,14 +712,8 @@ server <- function(input, output, session) {
         Compras = coalesce(Compras, 0),
         Gastos = coalesce(Gastos, 0),
         rentabilidad = Ventas - Compras - Gastos
-      )
-    
-    if (input$filtro_unidad != "Todas las Unidades") {
-      datos <- datos %>% filter(unidad_negocio == input$filtro_unidad)
-    }
-    if (!input$filtro_periodo %in% c("Todos los Meses", "Sin Datos")) {
-      datos <- datos %>% filter(periodo == input$filtro_periodo)
-    }
+      ) %>%
+      filtrar(input$filtro_periodo, input$filtro_unidad)
     req(nrow(datos) > 0)
     
     datos <- datos %>%
@@ -793,7 +732,7 @@ server <- function(input, output, session) {
       theme(
         panel.grid.major.x = element_blank(),
         axis.title.y = element_text(size = 10)) +
-      labs(x = NULL, y = "Rentabilidad (miles $)", fill = "Unidad de Negocio")
+      labs(x = NULL, y = "Rentabilidad\n(miles $)", fill = "Unidad de Negocio")
   })
   
   output$grafico_barras <- renderPlot({
@@ -832,19 +771,11 @@ server <- function(input, output, session) {
   })
   
   datos_equilibrio <- reactive({
-    req(input$filtro_periodo, nrow(ventas_limpias) > 0, nrow(compras_limpias) > 0)
+    req(nrow(ventas_limpias) > 0, nrow(compras_limpias) > 0)
     
-    v_periodo <- ventas_limpias
-    c_periodo <- compras_limpias
-    g_periodo <- gastos_limpios
-    
-    if (input$filtro_periodo != "Todos los Meses") {
-      v_periodo <- v_periodo %>% filter(periodo == input$filtro_periodo)
-      c_periodo <- c_periodo %>% filter(periodo == input$filtro_periodo)
-      if (nrow(g_periodo) > 0) {
-        g_periodo <- g_periodo %>% filter(periodo == input$filtro_periodo)
-      }
-    }
+    v_periodo <- filtrar(ventas_limpias, input$filtro_periodo)
+    c_periodo <- filtrar(compras_limpias, input$filtro_periodo)
+    g_periodo <- filtrar(gastos_limpios, input$filtro_periodo)
     
     ventas_tot <- sum(v_periodo$neto_gravado, na.rm = TRUE)
     cmv_tot <- c_periodo %>%
@@ -863,14 +794,21 @@ server <- function(input, output, session) {
       tibble(unidad_negocio = character(), gastos_directos = numeric())
     }
     
+    # CMV por unidad: mismo reparto mes a mes que usan en la rentabiliad y la comparación interanual
+    cmv_unidad <- compras_por_unidad %>%
+      filter(substr(periodo, 1, 4) == as.character(anio_actual)) %>%
+      filtrar(input$filtro_periodo) %>%
+      group_by(unidad_negocio) %>%
+      summarise(cmv_asignado = sum(monto, na.rm = TRUE), .groups = "drop")
+    
     res <- v_periodo %>%
       group_by(unidad_negocio) %>%
       summarise(ventas_reales = sum(neto_gravado, na.rm = TRUE), .groups = "drop") %>%
       left_join(gf_directos, by = "unidad_negocio") %>%
+      left_join(cmv_unidad, by = "unidad_negocio") %>%
       mutate(
         gastos_directos = replace_na(gastos_directos, 0),
-        participacion = ventas_reales / sum(ventas_reales),
-        cmv_asignado = cmv_tot * participacion,
+        cmv_asignado = replace_na(cmv_asignado, 0),
         margen_contribucion = ventas_reales - cmv_asignado,
         gastos_fijos = gastos_directos,
         resultado_neto = margen_contribucion - gastos_fijos,
@@ -881,7 +819,7 @@ server <- function(input, output, session) {
         }
       )
     
-    if (!is.null(input$filtro_unidad) && input$filtro_unidad != "Todas las Unidades") {
+    if (input$filtro_unidad != "Todas las Unidades") {
       res <- res %>% filter(unidad_negocio == input$filtro_unidad)
     }
     res
@@ -942,13 +880,12 @@ server <- function(input, output, session) {
   })
   
   output$tabla_desc_compras <- renderTable({
-    req(input$filtro_unidad)
     datos <- compras_desc() %>% filter(rubro %in% rubros_mercaderia)
     req(nrow(datos) > 0)
     
     # Con una unidad seleccionada, cada compra se asigna según la participación
     # de esa unidad en las ventas del mes de la compra (estimación)
-    if (!input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+    if (input$filtro_unidad != "Todas las Unidades") {
       datos <- datos %>%
         left_join(
           participacion_mensual %>%
@@ -1024,12 +961,11 @@ server <- function(input, output, session) {
   
   # --- Comparación interanual ---
   comparacion_filtrada <- reactive({
-    req(input$filtro_periodo, input$filtro_unidad)
     df <- resumen_mensual
     if (input$filtro_unidad != "Todas las Unidades") {
       df <- df %>% filter(unidad_negocio == input$filtro_unidad)
     }
-    if (!input$filtro_periodo %in% c("Todos los Meses", "Sin Datos")) {
+    if (input$filtro_periodo != "Todos los Meses") {
       df <- df %>% filter(mes == substr(input$filtro_periodo, 6, 7))
     }
     armar_comparacion(df)
@@ -1046,7 +982,7 @@ server <- function(input, output, session) {
         class = "alert alert-warning",
         paste0("⚠️ No hay meses con datos cargados en ambos años (", anio_base, " y ", anio_actual, ").")
       )
-    } else if (!is.null(input$filtro_unidad) && !input$filtro_unidad %in% c("Todas las Unidades", "Sin Datos")) {
+    } else if (input$filtro_unidad != "Todas las Unidades") {
       div(
         class = "alert alert-info",
         "Las compras no se registran por unidad: con una unidad seleccionada se estiman repartiendo las compras de cada mes según la participación de esa unidad en las ventas del mes."
@@ -1060,12 +996,6 @@ server <- function(input, output, session) {
     datos <- comparacion_filtrada() %>% filter(!is.na(coef))
     req(nrow(datos) > 0)
     
-    # Montos en miles de pesos para que los ejes y las etiquetas sean legibles
-    etiqueta_m <- label_number(
-      scale = 1e-3, prefix = "$",
-      accuracy = 1, big.mark = ".", decimal.mark = ","
-    )
-    
     datos_graf <- datos %>%
       select(mes, concepto, monto_base_aj, monto_actual) %>%
       pivot_longer(c(monto_base_aj, monto_actual), names_to = "serie", values_to = "monto") %>%
@@ -1078,7 +1008,7 @@ server <- function(input, output, session) {
     # Etiquetas de valor solo cuando hay pocos meses (si no, se superponen)
     capa_etiquetas <- if (n_distinct(datos_graf$mes) <= 4) {
       geom_text(
-        aes(label = etiqueta_m(monto)),
+        aes(label = etiqueta_miles(monto)),
         position = position_dodge(width = 0.8), vjust = -0.5, size = 3.6
       )
     } else {
@@ -1090,7 +1020,7 @@ server <- function(input, output, session) {
       capa_etiquetas +
       facet_wrap(~ concepto, nrow = 1, scales = "free_y") +
       scale_fill_manual(values = setNames(c("#95a5a6", "#18bc9c"), c(etiqueta_base, etiqueta_actual))) +
-      scale_y_continuous(labels = etiqueta_m, expand = expansion(mult = c(0, 0.15))) +
+      scale_y_continuous(labels = etiqueta_miles, expand = expansion(mult = c(0, 0.15))) +
       theme_minimal(base_size = 13) +
       theme(
         legend.position = "top",
@@ -1120,3 +1050,4 @@ server <- function(input, output, session) {
 
 # 5. LANZAMIENTO DE LA APLICACIÓN ----------------------------------------------
 shinyApp(ui = ui, server = server)
+
